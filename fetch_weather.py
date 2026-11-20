@@ -61,45 +61,29 @@ OUTPUT_CSV = "morocco_weather.csv"
 ARCHIVE_CSV = "data/morocco_weather_history.csv"
 
 
-def request_with_retry(url: str, params: dict, max_retries: int = 5) -> dict:
+def request_with_retry(url: str, params: dict, max_retries: int = 5) -> dict | list:
     delay = 5
     for attempt in range(1, max_retries + 1):
-        response = requests.get(url, params=params, timeout=30)
-        if response.status_code == 429:
-            print(f"Rate limited (429) on attempt {attempt}/{max_retries}. Sleeping {delay}s...")
+        try:
+            response = requests.get(url, params=params, timeout=60)
+            if response.status_code == 429:
+                print(f"Rate limited (429) on attempt {attempt}/{max_retries}. Sleeping {delay}s...")
+                time.sleep(delay)
+                delay *= 2
+                continue
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as exc:
+            print(f"Request error on attempt {attempt}/{max_retries}: {exc}. Sleeping {delay}s...")
+            if attempt == max_retries:
+                raise
             time.sleep(delay)
             delay *= 2
-            continue
-        response.raise_for_status()
-        return response.json()
-    raise RuntimeError(f"Exceeded max retries ({max_retries}) due to rate limiting (429).")
+    raise RuntimeError("Exceeded max retries.")
 
 
-def fetch_city_weather(city_info: dict, fetched_at: str) -> list[dict]:
-    params = {
-        "latitude": city_info["lat"],
-        "longitude": city_info["lon"],
-        "daily": [
-            "weather_code",
-            "temperature_2m_max",
-            "temperature_2m_min",
-            "apparent_temperature_max",
-            "apparent_temperature_min",
-            "precipitation_sum",
-            "rain_sum",
-            "precipitation_probability_max",
-            "wind_speed_10m_max",
-            "wind_gusts_10m_max",
-            "uv_index_max",
-        ],
-        "timezone": "Africa/Casablanca",
-        "past_days": 1,
-        "forecast_days": 7,
-    }
-    payload = request_with_retry(API_URL, params=params)
-    daily = payload.get("daily", {})
+def parse_city_payload(city_info: dict, daily: dict, fetched_at: str) -> list[dict]:
     dates = daily.get("time", [])
-
     rows = []
     for i, date_str in enumerate(dates):
         code = daily["weather_code"][i]
@@ -129,14 +113,48 @@ def fetch_city_weather(city_info: dict, fetched_at: str) -> list[dict]:
     return rows
 
 
+def fetch_batch_weather(batch_cities: list[dict], fetched_at: str) -> list[dict]:
+    params = {
+        "latitude": [c["lat"] for c in batch_cities],
+        "longitude": [c["lon"] for c in batch_cities],
+        "daily": [
+            "weather_code",
+            "temperature_2m_max",
+            "temperature_2m_min",
+            "apparent_temperature_max",
+            "apparent_temperature_min",
+            "precipitation_sum",
+            "rain_sum",
+            "precipitation_probability_max",
+            "wind_speed_10m_max",
+            "wind_gusts_max_kmh",
+            "uv_index_max",
+        ],
+        "timezone": "Africa/Casablanca",
+        "past_days": 1,
+        "forecast_days": 7,
+    }
+    params["daily"][9] = "wind_gusts_10m_max"
+
+    payload = request_with_retry(API_URL, params=params)
+    results = payload if isinstance(payload, list) else [payload]
+
+    rows: list[dict] = []
+    for city_info, item in zip(batch_cities, results):
+        rows.extend(parse_city_payload(city_info, item.get("daily", {}), fetched_at))
+    return rows
+
+
 def main() -> None:
     fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     all_rows: list[dict] = []
 
-    for idx, city_info in enumerate(CITIES):
-        all_rows.extend(fetch_city_weather(city_info, fetched_at))
-        if idx < len(CITIES) - 1:
-            time.sleep(1.5)
+    batch_size = 6
+    for i in range(0, len(CITIES), batch_size):
+        batch = CITIES[i : i + batch_size]
+        all_rows.extend(fetch_batch_weather(batch, fetched_at))
+        if i + batch_size < len(CITIES):
+            time.sleep(2)
 
     new_df = pd.DataFrame(all_rows)
 
