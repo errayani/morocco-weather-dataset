@@ -46,13 +46,15 @@ jobs:
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
         run: |
           mkdir -p ~/.kaggle
-          cat <<EOF > ~/.kaggle/kaggle.json
-          {"username":"${KAGGLE_USERNAME}","key":"${KAGGLE_KEY}"}
-          EOF
+          printf '{"username":"%s","key":"%s"}\n' "$KAGGLE_USERNAME" "$KAGGLE_KEY" > ~/.kaggle/kaggle.json
           chmod 600 ~/.kaggle/kaggle.json
 
-          if kaggle datasets status -p . >/dev/null 2>&1; then
-            kaggle datasets version -p . -m "Automated daily weather update ($(date -u +'%Y-%m-%d %H:%M UTC'))" --dir-mode zip
+          rm -rf kaggle_upload
+          mkdir -p kaggle_upload
+          cp morocco_weather.csv dataset-metadata.json kaggle_upload/
+
+          if kaggle datasets status abderafieerrayani/morocco-weather-forecast-dataset >/dev/null 2>&1; then
+            kaggle datasets version -p kaggle_upload -m "Daily automated update $(date -u +'%Y-%m-%d')"
           else
-            kaggle datasets create -p . --dir-mode zip
+            kaggle datasets create -p kaggle_upload
           fi
