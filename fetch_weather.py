@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime, timezone
 import pandas as pd
 import requests
@@ -60,6 +61,20 @@ OUTPUT_CSV = "morocco_weather.csv"
 ARCHIVE_CSV = "data/morocco_weather_history.csv"
 
 
+def request_with_retry(url: str, params: dict, max_retries: int = 5) -> dict:
+    delay = 5
+    for attempt in range(1, max_retries + 1):
+        response = requests.get(url, params=params, timeout=30)
+        if response.status_code == 429:
+            print(f"Rate limited (429) on attempt {attempt}/{max_retries}. Sleeping {delay}s...")
+            time.sleep(delay)
+            delay *= 2
+            continue
+        response.raise_for_status()
+        return response.json()
+    raise RuntimeError(f"Exceeded max retries ({max_retries}) due to rate limiting (429).")
+
+
 def fetch_city_weather(city_info: dict, fetched_at: str) -> list[dict]:
     params = {
         "latitude": city_info["lat"],
@@ -81,9 +96,7 @@ def fetch_city_weather(city_info: dict, fetched_at: str) -> list[dict]:
         "past_days": 1,
         "forecast_days": 7,
     }
-    response = requests.get(API_URL, params=params, timeout=30)
-    response.raise_for_status()
-    payload = response.json()
+    payload = request_with_retry(API_URL, params=params)
     daily = payload.get("daily", {})
     dates = daily.get("time", [])
 
@@ -120,8 +133,10 @@ def main() -> None:
     fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     all_rows: list[dict] = []
 
-    for city_info in CITIES:
+    for idx, city_info in enumerate(CITIES):
         all_rows.extend(fetch_city_weather(city_info, fetched_at))
+        if idx < len(CITIES) - 1:
+            time.sleep(1.5)
 
     new_df = pd.DataFrame(all_rows)
 
@@ -132,7 +147,6 @@ def main() -> None:
     else:
         combined_df = new_df
 
-    # إزالة التكرار بناءً على التاريخ والمدينة مع الاحتفاظ بآخر تحديث
     combined_df = combined_df.drop_duplicates(subset=["date", "city"], keep="last")
     combined_df = combined_df.sort_values(["date", "city"]).reset_index(drop=True)
 
